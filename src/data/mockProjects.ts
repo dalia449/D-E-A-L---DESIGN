@@ -1,12 +1,13 @@
 import { ArchitecturalProject } from '../types';
 
 import heroVilla from '../assets/images/deal_hero_villa_1790892290099.jpg';
+import dealHeroStudio from '../assets/images/deal_hero_studio_1791111272909.jpg';
 import villaInterior from '../assets/images/deal_villa_interior_1790892343014.jpg';
 import siteAerial from '../assets/images/deal_site_aerial_1790892303682.jpg';
 import paperSketch from '../assets/images/deal_paper_sketch_1790892316539.jpg';
 import furnitureItem from '../assets/images/deal_furniture_item_1790892328850.jpg';
 
-export { heroVilla, villaInterior, siteAerial, paperSketch, furnitureItem };
+export { heroVilla, dealHeroStudio, villaInterior, siteAerial, paperSketch, furnitureItem };
 
 export const INITIAL_PROJECTS: ArchitecturalProject[] = [
   {

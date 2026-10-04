@@ -26,7 +26,8 @@ import {
   Eye,
   EyeOff,
   History,
-  Check
+  Check,
+  Send
 } from 'lucide-react';
 
 interface AdminDashboardProps {
@@ -38,7 +39,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToApp, onC
   const { t, isRTL } = useI18n();
 
   const [activeTab, setActiveTab] = useState<
-    'overview' | 'users' | 'content' | 'brand' | 'projects' | 'reviews' | 'inquiries' | 'marketing' | 'audit'
+    'overview' | 'users' | 'email' | 'content' | 'brand' | 'projects' | 'reviews' | 'inquiries' | 'marketing' | 'audit'
   >('overview');
 
   const [loading, setLoading] = useState(true);
@@ -142,6 +143,108 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToApp, onC
   // Audit Logs
   const [auditLogs, setAuditLogs] = useState<Array<{ id: string; action: string; details: string; ip_address: string; created_at: string }>>([]);
 
+  // Real Email & SMTP Service State
+  const [emailStatus, setEmailStatus] = useState<{
+    provider: string;
+    senderEmail?: string;
+    senderName?: string;
+    smtpHost?: string;
+    smtpPort?: number;
+    smtpUser?: string;
+    hasSmtpPass?: boolean;
+    hasResendKey?: boolean;
+    connected: boolean;
+    connectionDetails?: string;
+    connectionError?: string;
+  } | null>(null);
+
+  const [emailForm, setEmailForm] = useState({
+    provider: 'custom_smtp',
+    smtpHost: '',
+    smtpPort: '587',
+    smtpUser: '',
+    smtpPass: '',
+    smtpSecure: false,
+    senderEmail: 'verify@deal-architecture.com',
+    senderName: 'DEAL Platform',
+    resendApiKey: ''
+  });
+
+  const [testEmailTo, setTestEmailTo] = useState('dd3.99d@gmail.com');
+  const [isSendingTest, setIsSendingTest] = useState(false);
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string; code?: string } | null>(null);
+  const [isSavingEmailConfig, setIsSavingEmailConfig] = useState(false);
+
+  const fetchEmailStatus = async () => {
+    try {
+      const res = await apiFetch<any>('/api/admin/email-status');
+      if (res.success) {
+        setEmailStatus(res);
+        setEmailForm(prev => ({
+          ...prev,
+          provider: res.provider !== 'none' ? res.provider : 'custom_smtp',
+          smtpHost: res.smtpHost || prev.smtpHost,
+          smtpPort: res.smtpPort ? String(res.smtpPort) : prev.smtpPort,
+          smtpUser: res.smtpUser || prev.smtpUser,
+          senderEmail: res.senderEmail || prev.senderEmail,
+          senderName: res.senderName || prev.senderName
+        }));
+      }
+    } catch (err: any) {
+      console.warn('Could not fetch email status:', err);
+    }
+  };
+
+  const handleSaveEmailConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingEmailConfig(true);
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    try {
+      const res = await apiFetch<any>('/api/admin/email-config', {
+        method: 'POST',
+        body: JSON.stringify({
+          provider: emailForm.provider,
+          smtpHost: emailForm.smtpHost,
+          smtpPort: Number(emailForm.smtpPort),
+          smtpUser: emailForm.smtpUser,
+          smtpPass: emailForm.smtpPass,
+          smtpSecure: emailForm.smtpSecure,
+          senderEmail: emailForm.senderEmail,
+          senderName: emailForm.senderName,
+          resendApiKey: emailForm.resendApiKey
+        })
+      });
+      setSuccessMsg(res.message || 'Email settings saved successfully.');
+      fetchEmailStatus();
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Failed to save email configuration.');
+    } finally {
+      setIsSavingEmailConfig(false);
+    }
+  };
+
+  const handleSendTestEmail = async () => {
+    if (!testEmailTo || isSendingTest) return;
+    setIsSendingTest(true);
+    setTestResult(null);
+    setErrorMsg(null);
+    try {
+      const res = await apiFetch<any>('/api/admin/test-email', {
+        method: 'POST',
+        body: JSON.stringify({ to: testEmailTo.trim() })
+      });
+      setTestResult({ success: true, message: res.message, code: res.code });
+      setSuccessMsg(`Test verification email sent to ${testEmailTo}!`);
+    } catch (err: any) {
+      const errMsg = err.message || 'Test email delivery failed.';
+      setTestResult({ success: false, message: errMsg });
+      setErrorMsg(`Delivery error: ${errMsg}`);
+    } finally {
+      setIsSendingTest(false);
+    }
+  };
+
   // Load Real Data from Server
   const fetchOverview = async () => {
     setLoading(true);
@@ -226,6 +329,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToApp, onC
     fetchProjects();
     fetchMarketingConsents();
     fetchAuditLogs();
+    fetchEmailStatus();
   }, []);
 
   const handleToggleUser = async (userId: string, currentStatus: boolean) => {
@@ -370,6 +474,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToApp, onC
         >
           <Users className="w-3.5 h-3.5" />
           <span>Users ({users.length})</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('email')}
+          className={`px-3 py-1.5 rounded transition-colors flex items-center gap-1.5 whitespace-nowrap ${
+            activeTab === 'email' ? 'bg-[#54483C] text-[#FAF7F2]' : 'text-[#756A60] hover:text-[#3F3832]'
+          }`}
+        >
+          <Mail className="w-3.5 h-3.5" />
+          <span>Email & SMTP</span>
+          {emailStatus?.connected ? (
+            <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+          ) : (
+            <span className="w-2 h-2 rounded-full bg-amber-400"></span>
+          )}
         </button>
 
         <button
@@ -615,6 +734,283 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToApp, onC
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+      {/* TAB: EMAIL & SMTP SERVICE */}
+      {activeTab === 'email' && (
+        <div className="mt-6 space-y-6 text-xs">
+          {/* Active Status Card */}
+          <div className="bg-[#FAF7F2] p-5 rounded-lg border border-[#D8CEC2] shadow-xs">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-[#D8CEC2]">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-[#EFE6DA] border border-[#D8CEC2] flex items-center justify-center text-[#54483C]">
+                  <Mail className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-serif-arch text-base font-bold text-[#3F3832]">
+                    Real Email Service & OTP Verification
+                  </h3>
+                  <p className="text-xs text-[#756A60]">
+                    Authoritative real email delivery for new account registration, 6-digit OTP codes, and password recovery.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className={`px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 ${
+                  emailStatus?.connected
+                    ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                    : 'bg-amber-100 text-amber-800 border border-amber-300'
+                }`}>
+                  <span className={`w-2 h-2 rounded-full ${emailStatus?.connected ? 'bg-emerald-500' : 'bg-amber-500'}`}></span>
+                  {emailStatus?.connected ? 'Connected & Ready' : 'Configuration Pending'}
+                </span>
+                <button
+                  type="button"
+                  onClick={fetchEmailStatus}
+                  className="px-2.5 py-1 bg-[#EFE6DA] border border-[#D8CEC2] rounded text-xs text-[#54483C] hover:bg-[#D8CEC2]"
+                >
+                  Verify Connection
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-4 text-xs">
+              <div className="bg-[#EFE6DA]/60 p-3 rounded border border-[#D8CEC2]">
+                <span className="text-[#756A60] block text-[11px] mb-1">Active Provider</span>
+                <span className="font-bold text-[#3F3832] uppercase">
+                  {emailStatus?.provider === 'custom_smtp' ? 'Custom SMTP' : emailStatus?.provider === 'resend' ? 'Resend API' : 'None Configured'}
+                </span>
+              </div>
+              <div className="bg-[#EFE6DA]/60 p-3 rounded border border-[#D8CEC2]">
+                <span className="text-[#756A60] block text-[11px] mb-1">Sender Address</span>
+                <span className="font-medium text-[#3F3832] truncate block">
+                  {emailStatus?.senderEmail || 'verify@deal-architecture.com'}
+                </span>
+              </div>
+              <div className="bg-[#EFE6DA]/60 p-3 rounded border border-[#D8CEC2]">
+                <span className="text-[#756A60] block text-[11px] mb-1">Sender Name</span>
+                <span className="font-medium text-[#3F3832] truncate block">
+                  {emailStatus?.senderName || 'DEAL Architectural Platform'}
+                </span>
+              </div>
+            </div>
+
+            {emailStatus?.connectionDetails && (
+              <div className="mt-3 p-2.5 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded text-[11px]">
+                {emailStatus.connectionDetails}
+              </div>
+            )}
+
+            {emailStatus?.connectionError && (
+              <div className="mt-3 p-2.5 bg-rose-50 border border-rose-200 text-rose-800 rounded text-[11px]">
+                Diagnostic Warning: {emailStatus.connectionError}
+              </div>
+            )}
+          </div>
+
+          {/* Live Delivery Test Section */}
+          <div className="bg-[#FAF7F2] p-5 rounded-lg border border-[#D8CEC2]">
+            <h4 className="font-serif-arch text-sm font-semibold text-[#54483C] uppercase tracking-wider mb-2">
+              Send Live Test Verification Email
+            </h4>
+            <p className="text-xs text-[#756A60] mb-4">
+              Trigger a live 6-digit verification code dispatch to confirm emails physically arrive in your real email inbox.
+            </p>
+
+            <div className="flex flex-col sm:flex-row items-center gap-3 max-w-lg">
+              <input
+                type="email"
+                value={testEmailTo}
+                onChange={(e) => setTestEmailTo(e.target.value)}
+                placeholder="recipient@domain.com"
+                className="w-full bg-[#FAF7F2] border border-[#D8CEC2] rounded px-3 py-2 text-xs focus:outline-none focus:border-[#54483C]"
+              />
+              <button
+                type="button"
+                onClick={handleSendTestEmail}
+                disabled={isSendingTest || !testEmailTo}
+                className="w-full sm:w-auto px-4 py-2 bg-[#54483C] text-[#FAF7F2] rounded text-xs font-semibold hover:bg-[#3F3832] transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap disabled:opacity-50"
+              >
+                <Send className="w-3.5 h-3.5" />
+                <span>{isSendingTest ? 'Sending Real Email...' : 'Send Live Test Email'}</span>
+              </button>
+            </div>
+
+            {testResult && (
+              <div className={`mt-3 p-3 rounded border text-xs ${
+                testResult.success
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-rose-50 border-rose-200 text-rose-800'
+              }`}>
+                <div className="font-semibold">{testResult.message}</div>
+                {testResult.code && (
+                  <div className="mt-1 font-mono text-[11px]">
+                    Delivered 6-Digit OTP Code: <strong>{testResult.code}</strong> (Expires in 10 min)
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Email Provider Configuration Form */}
+          <form onSubmit={handleSaveEmailConfig} className="bg-[#FAF7F2] p-5 rounded-lg border border-[#D8CEC2] space-y-4">
+            <h4 className="font-serif-arch text-sm font-semibold text-[#54483C] uppercase tracking-wider">
+              Email Provider Credentials (.env / Persistent DB)
+            </h4>
+            <p className="text-xs text-[#756A60]">
+              Credentials saved here are stored securely server-side and take effect immediately without restarting the server.
+            </p>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-[#756A60] font-medium mb-1">Email Delivery Method</label>
+                <div className="flex gap-4">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="emailProvider"
+                      value="custom_smtp"
+                      checked={emailForm.provider === 'custom_smtp'}
+                      onChange={() => setEmailForm(prev => ({ ...prev, provider: 'custom_smtp' }))}
+                      className="accent-[#54483C]"
+                    />
+                    <span>Custom SMTP (Gmail, SendGrid, Mailgun, Brevo, AWS SES)</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="emailProvider"
+                      value="resend"
+                      checked={emailForm.provider === 'resend'}
+                      onChange={() => setEmailForm(prev => ({ ...prev, provider: 'resend' }))}
+                      className="accent-[#54483C]"
+                    />
+                    <span>Resend API (resend.com)</span>
+                  </label>
+                </div>
+              </div>
+
+              {emailForm.provider === 'custom_smtp' && (
+                <div className="space-y-3 pt-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[#756A60] font-medium mb-1">SMTP Host</label>
+                      <input
+                        type="text"
+                        value={emailForm.smtpHost}
+                        onChange={(e) => setEmailForm(prev => ({ ...prev, smtpHost: e.target.value }))}
+                        placeholder="e.g. smtp.gmail.com or smtp.sendgrid.net"
+                        className="w-full bg-[#FAF7F2] border border-[#D8CEC2] rounded px-3 py-2 text-xs focus:outline-none focus:border-[#54483C]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[#756A60] font-medium mb-1">SMTP Port</label>
+                      <input
+                        type="number"
+                        value={emailForm.smtpPort}
+                        onChange={(e) => setEmailForm(prev => ({ ...prev, smtpPort: e.target.value }))}
+                        placeholder="587 or 465"
+                        className="w-full bg-[#FAF7F2] border border-[#D8CEC2] rounded px-3 py-2 text-xs focus:outline-none focus:border-[#54483C]"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[#756A60] font-medium mb-1">SMTP Username / Email</label>
+                      <input
+                        type="text"
+                        value={emailForm.smtpUser}
+                        onChange={(e) => setEmailForm(prev => ({ ...prev, smtpUser: e.target.value }))}
+                        placeholder="e.g. your-email@gmail.com or apikey"
+                        className="w-full bg-[#FAF7F2] border border-[#D8CEC2] rounded px-3 py-2 text-xs focus:outline-none focus:border-[#54483C]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[#756A60] font-medium mb-1">SMTP Password / App Password</label>
+                      <input
+                        type="password"
+                        value={emailForm.smtpPass}
+                        onChange={(e) => setEmailForm(prev => ({ ...prev, smtpPass: e.target.value }))}
+                        placeholder="••••••••••••••••"
+                        className="w-full bg-[#FAF7F2] border border-[#D8CEC2] rounded px-3 py-2 text-xs focus:outline-none focus:border-[#54483C]"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 pt-1">
+                    <input
+                      type="checkbox"
+                      id="smtpSecure"
+                      checked={emailForm.smtpSecure}
+                      onChange={(e) => setEmailForm(prev => ({ ...prev, smtpSecure: e.target.checked }))}
+                      className="accent-[#54483C]"
+                    />
+                    <label htmlFor="smtpSecure" className="text-[#756A60] text-xs cursor-pointer">
+                      Use SSL/TLS directly (Port 465). For port 587, leave unchecked (uses STARTTLS).
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              {emailForm.provider === 'resend' && (
+                <div className="space-y-3 pt-2">
+                  <div>
+                    <label className="block text-[#756A60] font-medium mb-1">Resend API Key</label>
+                    <input
+                      type="password"
+                      value={emailForm.resendApiKey}
+                      onChange={(e) => setEmailForm(prev => ({ ...prev, resendApiKey: e.target.value }))}
+                      placeholder="re_••••••••••••••••"
+                      className="w-full bg-[#FAF7F2] border border-[#D8CEC2] rounded px-3 py-2 text-xs focus:outline-none focus:border-[#54483C]"
+                    />
+                    <span className="text-[10px] text-[#756A60] mt-1 block">
+                      Obtain an API key from your Resend Dashboard (resend.com/api-keys).
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-[#D8CEC2]">
+                <div>
+                  <label className="block text-[#756A60] font-medium mb-1">Sender Email Address</label>
+                  <input
+                    type="text"
+                    value={emailForm.senderEmail}
+                    onChange={(e) => setEmailForm(prev => ({ ...prev, senderEmail: e.target.value }))}
+                    placeholder="verify@deal-architecture.com"
+                    className="w-full bg-[#FAF7F2] border border-[#D8CEC2] rounded px-3 py-2 text-xs focus:outline-none focus:border-[#54483C]"
+                  />
+                  <span className="text-[10px] text-[#756A60] mt-1 block">
+                    Must be a verified sender or domain on your email provider.
+                  </span>
+                </div>
+                <div>
+                  <label className="block text-[#756A60] font-medium mb-1">Sender Display Name</label>
+                  <input
+                    type="text"
+                    value={emailForm.senderName}
+                    onChange={(e) => setEmailForm(prev => ({ ...prev, senderName: e.target.value }))}
+                    placeholder="DEAL Platform"
+                    className="w-full bg-[#FAF7F2] border border-[#D8CEC2] rounded px-3 py-2 text-xs focus:outline-none focus:border-[#54483C]"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="pt-2">
+              <button
+                type="submit"
+                disabled={isSavingEmailConfig}
+                className="px-5 py-2.5 bg-[#54483C] text-[#FAF7F2] rounded text-xs font-semibold hover:bg-[#3F3832] transition-colors flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+              >
+                <Save className="w-3.5 h-3.5" />
+                <span>{isSavingEmailConfig ? 'Saving & Verifying...' : 'Save Email Configuration'}</span>
+              </button>
+            </div>
+          </form>
         </div>
       )}
 

@@ -1,10 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useI18n } from '../lib/i18n';
 import { DealLogo } from './DealLogo';
-import { heroVilla } from '../data/mockProjects';
+import { dealHeroStudio } from '../data/mockProjects';
 import { UserSession } from '../types';
 import { apiFetch, setStoredSessionToken } from '../lib/api';
-import { Mail, Lock, User, ArrowRight, ShieldCheck, CheckCircle2, Globe, AlertCircle } from 'lucide-react';
+import { Mail, Lock, User, ArrowRight, ShieldCheck, CheckCircle2, Globe, AlertCircle, RefreshCw } from 'lucide-react';
 
 interface AuthScreenProps {
   onLoginSuccess: (session: UserSession) => void;
@@ -23,9 +23,82 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
   const [verificationCode, setVerificationCode] = useState('');
   const [newPassword, setNewPassword] = useState('');
 
+  // 6-digit separated OTP inputs state and countdown
+  const [otpDigits, setOtpDigits] = useState<string[]>(['', '', '', '', '', '']);
+  const digitInputRefs = useRef<(HTMLInputElement | null)[]>([]);
+  const [resendCooldown, setResendCooldown] = useState<number>(0);
+
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [infoMsg, setInfoMsg] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Resend cooldown timer
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const interval = setInterval(() => {
+      setResendCooldown((prev) => Math.max(0, prev - 1));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [resendCooldown]);
+
+  const handleDigitChange = (index: number, val: string) => {
+    const cleaned = val.replace(/\D/g, '');
+    const newDigits = [...otpDigits];
+
+    if (cleaned.length > 1) {
+      // If user pasted or typed multiple digits
+      const chars = cleaned.slice(0, 6).split('');
+      for (let i = 0; i < 6; i++) {
+        newDigits[i] = chars[i] || '';
+      }
+      setOtpDigits(newDigits);
+      const nextIdx = Math.min(chars.length, 5);
+      digitInputRefs.current[nextIdx]?.focus();
+      return;
+    }
+
+    newDigits[index] = cleaned;
+    setOtpDigits(newDigits);
+
+    // Automatically focus next field if digit entered
+    if (cleaned && index < 5) {
+      digitInputRefs.current[index + 1]?.focus();
+    }
+  };
+
+  const handleDigitKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Backspace') {
+      if (!otpDigits[index] && index > 0) {
+        const newDigits = [...otpDigits];
+        newDigits[index - 1] = '';
+        setOtpDigits(newDigits);
+        digitInputRefs.current[index - 1]?.focus();
+      } else {
+        const newDigits = [...otpDigits];
+        newDigits[index] = '';
+        setOtpDigits(newDigits);
+      }
+    } else if (e.key === 'ArrowLeft' && index > 0) {
+      digitInputRefs.current[index - 1]?.focus();
+    } else if (e.key === 'ArrowRight' && index < 5) {
+      digitInputRefs.current[index + 1]?.focus();
+    }
+  };
+
+  const handleDigitPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    e.preventDefault();
+    const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 6);
+    if (!pasted) return;
+
+    const newDigits = ['', '', '', '', '', ''];
+    pasted.split('').forEach((char, idx) => {
+      if (idx < 6) newDigits[idx] = char;
+    });
+    setOtpDigits(newDigits);
+
+    const targetFocus = Math.min(pasted.length, 5);
+    digitInputRefs.current[targetFocus]?.focus();
+  };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -92,6 +165,11 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
 
       setInfoMsg(data.message || 'Verification code sent to your email.');
       setMode('verify');
+      setOtpDigits(['', '', '', '', '', '']);
+      setResendCooldown(45);
+      setTimeout(() => {
+        digitInputRefs.current[0]?.focus();
+      }, 100);
     } catch (err: any) {
       setErrorMsg(err.message || 'Registration failed.');
     } finally {
@@ -102,6 +180,13 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
   const handleVerifyEmail = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
+
+    const code = otpDigits.join('').trim();
+    if (code.length < 6) {
+      setErrorMsg('Please enter the complete 6-digit verification code.');
+      return;
+    }
+
     setIsSubmitting(true);
 
     try {
@@ -114,7 +199,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
         method: 'POST',
         body: JSON.stringify({
           email: email.trim(),
-          code: verificationCode.trim()
+          code
         })
       });
 
@@ -130,14 +215,19 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
   };
 
   const handleResendCode = async () => {
+    if (resendCooldown > 0 || isSubmitting) return;
     setErrorMsg(null);
+    setInfoMsg(null);
     setIsSubmitting(true);
     try {
       const data = await apiFetch<{ success: boolean; message: string }>('/api/auth/resend-code', {
         method: 'POST',
         body: JSON.stringify({ email: email.trim() })
       });
-      setInfoMsg(data.message || 'Verification code sent to your email.');
+      setInfoMsg(data.message || 'A new verification code has been dispatched to your email.');
+      setResendCooldown(45);
+      setOtpDigits(['', '', '', '', '', '']);
+      digitInputRefs.current[0]?.focus();
     } catch (err: any) {
       setErrorMsg(err.message || 'Failed to resend code.');
     } finally {
@@ -204,43 +294,22 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
   };
 
   return (
-    <div className="min-h-screen w-full bg-[#F6EFE5] flex items-stretch select-none text-[#3F3832]">
-      {/* LEFT: Split Architectural Hero Visual */}
-      <div className="hidden lg:flex lg:w-1/2 relative overflow-hidden bg-[#2C241E]">
+    <div className="h-screen w-full bg-[#F6EFE5] flex flex-col sm:flex-row overflow-hidden select-none text-[#3F3832]">
+      {/* LEFT: 55% Split Architectural Hero Visual - Clean & Unobstructed */}
+      <div className="w-full sm:w-[55%] h-64 sm:h-full relative overflow-hidden bg-[#2C241E] flex-shrink-0">
         <img
-          src={heroVilla}
-          alt="DEAL Architectural Masterpiece"
-          className="w-full h-full object-cover opacity-90 transition-transform duration-1000 hover:scale-105"
+          src={dealHeroStudio}
+          alt="DEAL Architectural Engineering Studio - 3D Villa Emerging from Laptop with Hand Gesture Interaction"
+          referrerPolicy="no-referrer"
+          className="w-full h-full object-cover object-center opacity-95 transition-transform duration-1000 hover:scale-[1.02]"
         />
 
-        {/* Ambient Dark Overlay */}
-        <div className="absolute inset-0 bg-gradient-to-t from-[#2C241E]/95 via-[#2C241E]/40 to-transparent"></div>
-
-        {/* Top Floating Badge */}
-        <div className="absolute top-8 left-8 z-10">
-          <DealLogo variant="horizontal" theme="light" />
-        </div>
-
-        {/* Bottom Architectural Manifesto */}
-        <div className="absolute bottom-10 left-10 right-10 z-10 text-[#FAF7F2]">
-          <span className="text-[10px] tracking-[0.3em] uppercase text-[#D8CEC2] font-semibold block mb-2">
-            INTELLIGENT ARCHITECTURAL WORKFLOW
-          </span>
-          <h2 className="font-serif-arch text-2xl xl:text-3xl font-bold leading-tight">
-            From Hand Sketches & Raw Land to Interactive 3D Architecture.
-          </h2>
-          <p className="text-xs text-[#D8CEC2] mt-3 leading-relaxed max-w-lg">
-            "DEAL transforms traditional architectural friction into an accelerated digital synthesis. Engineers guide the intent; AI analyzes boundaries, microclimate, and spatial harmonics."
-          </p>
-          <div className="mt-4 pt-3 border-t border-[#FAF7F2]/20 flex items-center justify-between text-[11px] text-[#D8CEC2]">
-            <span>Architectural Engineering Platform</span>
-            <span>Riyadh · Jeddah · Gulf Region</span>
-          </div>
-        </div>
+        {/* Ambient Subtle Vignette - Clean and Unobstructed */}
+        <div className="absolute inset-0 bg-gradient-to-t from-black/35 via-transparent to-black/10 pointer-events-none"></div>
       </div>
 
-      {/* RIGHT: Clean Architectural Authentication Panel */}
-      <div className="w-full lg:w-1/2 flex flex-col justify-between p-8 sm:p-12 md:p-16 max-w-2xl mx-auto">
+      {/* RIGHT: 45% Clean Architectural Authentication Panel */}
+      <div className="w-full sm:w-[45%] h-full flex flex-col justify-between p-6 sm:p-7 md:p-8 lg:p-12 overflow-y-auto bg-[#F6EFE5]">
         {/* Top Header Bar: Language Switcher */}
         <div className="flex items-center justify-between">
           <div className="lg:hidden">
@@ -261,17 +330,23 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
         {/* Center Form Container */}
         <div className="my-auto py-8">
           {/* Brand Logo & Editorial Kicker */}
-          <div className="text-center mb-8">
-            <DealLogo variant="full" size="md" className="mx-auto mb-3" />
-            <h1 className="font-serif-arch text-xl font-bold text-[#3F3832]">
+          <div className="text-center mb-6">
+            <DealLogo variant="full" size="md" className="mx-auto mb-4" />
+            <h1 className="font-serif-arch text-2xl font-bold text-[#3F3832] tracking-tight uppercase">
               {mode === 'login' && 'Welcome to DEAL'}
               {mode === 'register' && 'Join the DEAL Network'}
-              {mode === 'verify' && 'Verify Your Email'}
+              {mode === 'verify' && 'VERIFY YOUR EMAIL'}
               {mode === 'forgot' && 'Reset Account Password'}
               {mode === 'reset' && 'Set New Password'}
             </h1>
-            <p className="text-xs text-[#756A60] mt-1 font-serif-arch tracking-wide">
-              "Design smarter. Build better."
+            <p className="text-xs text-[#756A60] mt-1.5 font-medium">
+              {mode === 'verify'
+                ? 'Enter the 6-digit verification code sent to your email address.'
+                : mode === 'forgot'
+                ? 'Enter your registered email to receive a recovery code.'
+                : mode === 'reset'
+                ? 'Create a strong, new password for your account.'
+                : '"Design smarter. Build better."'}
             </p>
           </div>
 
@@ -456,49 +531,72 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
 
           {/* VERIFY EMAIL CODE FORM */}
           {mode === 'verify' && (
-            <form onSubmit={handleVerifyEmail} className="space-y-4 text-xs">
-              <div className="bg-[#EFE6DA] p-3 rounded border border-[#D8CEC2] text-center">
-                <span className="text-[#756A60] block text-[11px]">Verification Code Dispatched to:</span>
-                <strong className="text-[#3F3832] font-semibold">{email}</strong>
+            <form onSubmit={handleVerifyEmail} className="space-y-6 text-xs max-w-sm mx-auto w-full">
+              {/* Subtle Professional Container Showing the User's Email */}
+              <div className="bg-[#EFE6DA]/80 border border-[#D8CEC2] rounded-lg px-4 py-2.5 flex items-center justify-center gap-2 text-xs text-[#54483C] shadow-xs">
+                <Mail className="w-4 h-4 text-[#8A7A6A] flex-shrink-0" />
+                <span className="text-[#756A60]">Sent to:</span>
+                <span className="font-semibold text-[#3F3832] truncate">{email}</span>
               </div>
 
+              {/* Six Separated Digit Boxes */}
               <div>
-                <label className="text-[#756A60] font-medium block mb-1 text-center">{t('enterCode')}</label>
-                <input
-                  type="text"
-                  required
-                  maxLength={6}
-                  value={verificationCode}
-                  onChange={(e) => setVerificationCode(e.target.value.replace(/\D/g, ''))}
-                  placeholder="------"
-                  className="w-full text-center tracking-[0.6em] font-mono font-bold text-lg bg-[#FAF7F2] border border-[#D8CEC2] rounded py-2.5 text-[#3F3832] focus:outline-none focus:border-[#54483C]"
-                />
+                <label className="block text-xs font-semibold text-[#54483C] uppercase tracking-wider mb-3 text-center">
+                  Verification Code
+                </label>
+                <div className="flex items-center justify-center gap-2 sm:gap-2.5" dir="ltr">
+                  {otpDigits.map((digit, idx) => (
+                    <input
+                      key={idx}
+                      ref={(el) => { digitInputRefs.current[idx] = el; }}
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      pattern="[0-9]*"
+                      maxLength={1}
+                      value={digit}
+                      onChange={(e) => handleDigitChange(idx, e.target.value)}
+                      onKeyDown={(e) => handleDigitKeyDown(idx, e)}
+                      onPaste={handleDigitPaste}
+                      className="w-10 h-13 sm:w-12 sm:h-15 text-2xl font-bold font-mono text-center rounded-lg bg-[#FAF7F2] border-2 border-[#D8CEC2] text-[#3F3832] focus:border-[#54483C] focus:bg-white focus:outline-none shadow-sm transition-all"
+                    />
+                  ))}
+                </div>
               </div>
 
+              {/* Primary Action Button */}
               <button
                 type="submit"
-                disabled={isSubmitting || verificationCode.length < 6}
-                className="w-full py-2.5 bg-[#54483C] text-[#FAF7F2] rounded text-xs font-semibold hover:bg-[#3F3832] transition-colors flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
+                disabled={isSubmitting || otpDigits.join('').length < 6}
+                className="w-full py-3 bg-[#54483C] text-[#FAF7F2] rounded-lg text-sm font-semibold hover:bg-[#3F3832] transition-colors flex items-center justify-center gap-2 shadow-sm disabled:opacity-50"
               >
                 <ShieldCheck className="w-4 h-4" />
-                <span>{isSubmitting ? 'Validating...' : t('verifyEmail')}</span>
+                <span>{isSubmitting ? 'Verifying Code...' : 'Verify Email'}</span>
               </button>
 
-              <div className="flex items-center justify-between text-xs pt-2">
-                <button
-                  type="button"
-                  onClick={handleResendCode}
-                  className="text-[#8A7A6A] hover:text-[#54483C] underline"
-                >
-                  {t('resendCode')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => { setErrorMsg(null); setInfoMsg(null); setMode('login'); }}
-                  className="text-[#8A7A6A] hover:text-[#54483C]"
-                >
-                  {t('backToLogin')}
-                </button>
+              {/* Resend Code & Back to Sign In */}
+              <div className="text-center space-y-3 pt-1">
+                <div className="text-xs text-[#756A60]">
+                  Didn't receive the code?{' '}
+                  <button
+                    type="button"
+                    onClick={handleResendCode}
+                    disabled={resendCooldown > 0 || isSubmitting}
+                    className="font-semibold text-[#54483C] hover:underline disabled:text-[#8A7A6A] disabled:no-underline disabled:cursor-not-allowed"
+                  >
+                    {resendCooldown > 0 ? `Resend Code in ${resendCooldown}s` : 'Resend Code'}
+                  </button>
+                </div>
+
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => { setErrorMsg(null); setInfoMsg(null); setMode('login'); }}
+                    className="text-xs text-[#8A7A6A] hover:text-[#54483C] transition-colors"
+                  >
+                    Back to Sign In
+                  </button>
+                </div>
               </div>
             </form>
           )}

@@ -16,6 +16,11 @@ import {
   queryOne,
   promoteOwnerIfRegistered
 } from './server/db.js';
+import {
+  sendVerificationEmail,
+  verifyEmailConnection,
+  getResolvedEmailConfig
+} from './server/email.js';
 
 dotenv.config();
 
@@ -149,6 +154,13 @@ app.post('/api/auth/register', async (req, res) => {
     return res.status(400).json({ error: 'Password must be at least 8 characters long.' });
   }
 
+  const emailConfig = await getResolvedEmailConfig();
+  if (emailConfig.provider === 'none') {
+    return res.status(503).json({
+      error: 'Email delivery service is pending configuration. Please set SMTP_HOST, SMTP_PORT, SMTP_USER, and SMTP_PASS in .env or configure Email Provider in the Executive Control Center to receive verification emails.'
+    });
+  }
+
   const db = await getDatabase();
   const existingUser = queryOne(db, "SELECT id FROM users WHERE LOWER(email) = ?", [cleanEmail]);
   if (existingUser) {
@@ -177,9 +189,9 @@ app.post('/api/auth/register', async (req, res) => {
     );
   }
 
-  // Generate 6-digit verification code with 15-minute expiration
+  // Generate random 6-digit verification code with 10-minute expiration
   const code = generateVerificationCode();
-  const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
   db.run(
     `INSERT INTO email_verification_tokens (id, email, code, token_hash, expires_at, created_at)
      VALUES (?, ?, ?, ?, ?, ?)`,
@@ -188,17 +200,28 @@ app.post('/api/auth/register', async (req, res) => {
 
   saveDatabase();
 
-  // Secure Server-Side Email Dispatch Logging (never returned to client)
-  console.log(`\n========================================`);
-  console.log(`[SECURE EMAIL DISPATCH]`);
-  console.log(`To: ${cleanEmail}`);
-  console.log(`Subject: Verify your DEAL Architectural Platform Account`);
-  console.log(`Verification Code: ${code} (Expires in 15 minutes)`);
-  console.log(`========================================\n`);
+  // Trigger real email delivery through email provider
+  try {
+    const delivery = await sendVerificationEmail({
+      to: cleanEmail,
+      name: name.trim(),
+      code,
+      type: 'verification'
+    });
+    console.log(`[AUTH] Verification email dispatched to ${cleanEmail} via ${delivery.provider} (ID: ${delivery.messageId || 'ok'})`);
+  } catch (emailErr: any) {
+    console.warn(`[AUTH] Email dispatch error to ${cleanEmail}:`, emailErr.message || emailErr);
+    // Rollback unverified user and token so user can retry cleanly once service is reachable
+    db.run("DELETE FROM email_verification_tokens WHERE email = ?", [cleanEmail]);
+    db.run("DELETE FROM users WHERE id = ?", [userId]);
+    saveDatabase();
+    return res.status(503).json({
+      error: `Email delivery failed: ${emailErr.message || 'Unable to connect to email sending service'}`
+    });
+  }
 
   await recordAuditLog(userId, 'USER_REGISTERED', `User registered: ${cleanEmail}`, req.ip || '');
 
-  // Return strictly secure message with zero exposed codes
   return res.json({
     success: true,
     message: 'Verification code sent to your email.'
@@ -285,15 +308,49 @@ app.post('/api/auth/resend-code', async (req, res) => {
 
   const cleanEmail = email.trim().toLowerCase();
   const db = await getDatabase();
-  const user = queryOne<{ id: string }>(db, "SELECT id FROM users WHERE LOWER(email) = ?", [cleanEmail]);
+  const user = queryOne<{ id: string; name: string; is_verified: number }>(
+    db,
+    "SELECT id, name, is_verified FROM users WHERE LOWER(email) = ?",
+    [cleanEmail]
+  );
 
   if (!user) {
     return res.status(404).json({ error: 'No account found with this email.' });
   }
 
+  if (user.is_verified === 1) {
+    return res.status(400).json({ error: 'This account is already verified. Please sign in.' });
+  }
+
+  const emailConfig = await getResolvedEmailConfig();
+  if (emailConfig.provider === 'none') {
+    return res.status(503).json({
+      error: 'Email delivery service is pending configuration. Please set SMTP_HOST, SMTP_PORT, SMTP_USER, and SMTP_PASS in .env or configure Email Provider in the Executive Control Center to receive verification emails.'
+    });
+  }
+
+  // Rate limiting: prevent spamming resend (minimum 45 seconds between requests)
+  const recentToken = queryOne<{ created_at: string }>(
+    db,
+    `SELECT created_at FROM email_verification_tokens
+     WHERE LOWER(email) = ?
+     ORDER BY created_at DESC LIMIT 1`,
+    [cleanEmail]
+  );
+
+  if (recentToken) {
+    const timeSinceLast = Date.now() - new Date(recentToken.created_at).getTime();
+    if (timeSinceLast < 45000) {
+      const waitSeconds = Math.ceil((45000 - timeSinceLast) / 1000);
+      return res.status(429).json({
+        error: `Please wait ${waitSeconds} seconds before requesting another code.`
+      });
+    }
+  }
+
   const code = generateVerificationCode();
   const now = new Date().toISOString();
-  const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
   db.run(
     `INSERT INTO email_verification_tokens (id, email, code, token_hash, expires_at, created_at)
@@ -302,11 +359,24 @@ app.post('/api/auth/resend-code', async (req, res) => {
   );
   saveDatabase();
 
-  console.log(`\n[SECURE EMAIL DISPATCH - RESEND] To: ${cleanEmail} | Code: ${code}\n`);
+  try {
+    await sendVerificationEmail({
+      to: cleanEmail,
+      name: user.name,
+      code,
+      type: 'verification'
+    });
+    console.log(`[AUTH] Resent verification code to ${cleanEmail}`);
+  } catch (emailErr: any) {
+    console.warn(`[AUTH] Failed to resend email to ${cleanEmail}:`, emailErr.message || emailErr);
+    return res.status(503).json({
+      error: `Failed to deliver verification email: ${emailErr.message || 'Service unavailable'}`
+    });
+  }
 
   return res.json({
     success: true,
-    message: 'Verification code sent to your email.'
+    message: 'A new verification code has been dispatched to your email.'
   });
 });
 
@@ -404,15 +474,22 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 
   const cleanEmail = email.trim().toLowerCase();
   const db = await getDatabase();
-  const user = queryOne<{ id: string }>(db, "SELECT id FROM users WHERE LOWER(email) = ?", [cleanEmail]);
+  const user = queryOne<{ id: string; name: string }>(db, "SELECT id, name FROM users WHERE LOWER(email) = ?", [cleanEmail]);
 
   if (!user) {
     return res.status(404).json({ error: 'No account registered with this email address.' });
   }
 
+  const emailConfig = await getResolvedEmailConfig();
+  if (emailConfig.provider === 'none') {
+    return res.status(503).json({
+      error: 'Email delivery service is pending configuration. Please set SMTP_HOST, SMTP_PORT, SMTP_USER, and SMTP_PASS in .env or configure Email Provider in the Executive Control Center to receive password reset emails.'
+    });
+  }
+
   const code = generateVerificationCode();
   const now = new Date().toISOString();
-  const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
   db.run(
     `INSERT INTO password_reset_tokens (id, email, code, token_hash, expires_at, created_at)
@@ -421,11 +498,19 @@ app.post('/api/auth/forgot-password', async (req, res) => {
   );
   saveDatabase();
 
-  console.log(`\n========================================`);
-  console.log(`[SECURE EMAIL DISPATCH - PASSWORD RESET]`);
-  console.log(`To: ${cleanEmail}`);
-  console.log(`Reset Code: ${code} (Expires in 15 minutes)`);
-  console.log(`========================================\n`);
+  try {
+    await sendVerificationEmail({
+      to: cleanEmail,
+      name: user.name,
+      code,
+      type: 'password_reset'
+    });
+  } catch (emailErr: any) {
+    console.warn(`[AUTH] Failed to send password reset code to ${cleanEmail}:`, emailErr.message || emailErr);
+    return res.status(503).json({
+      error: `Failed to deliver password reset code: ${emailErr.message || 'Email delivery service unavailable'}`
+    });
+  }
 
   return res.json({
     success: true,
@@ -918,6 +1003,104 @@ app.get('/api/admin/marketing-consents', authMiddleware, ownerMiddleware, async 
   const db = await getDatabase();
   const consents = queryAll(db, "SELECT email, opted_in, consented_at FROM marketing_consents WHERE opted_in = 1 ORDER BY consented_at DESC");
   return res.json({ success: true, consents });
+});
+
+// GET /api/admin/email-status
+app.get('/api/admin/email-status', authMiddleware, ownerMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const config = await getResolvedEmailConfig();
+    const connection = await verifyEmailConnection();
+    return res.json({
+      success: true,
+      provider: config.provider,
+      senderEmail: config.senderEmail,
+      senderName: config.senderName,
+      smtpHost: config.smtpHost ? config.smtpHost.replace(/^(.{2}).*(.{2})$/, '$1***$2') : undefined,
+      smtpPort: config.smtpPort,
+      smtpUser: config.smtpUser ? config.smtpUser.replace(/^(.{2}).*(.{2})$/, '$1***$2') : undefined,
+      hasSmtpPass: Boolean(config.smtpPass),
+      hasResendKey: Boolean(config.resendApiKey),
+      connected: connection.connected,
+      connectionDetails: connection.details,
+      connectionError: connection.error
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to check email status' });
+  }
+});
+
+// POST /api/admin/email-config
+app.post('/api/admin/email-config', authMiddleware, ownerMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+  const { provider, smtpHost, smtpPort, smtpUser, smtpPass, smtpSecure, senderEmail, senderName, resendApiKey } = req.body;
+  const db = await getDatabase();
+  const now = new Date().toISOString();
+
+  let existingConfig: any = {};
+  const row = queryOne<{ value_json: string }>(db, "SELECT value_json FROM platform_settings WHERE setting_key = 'email_config'");
+  if (row && row.value_json) {
+    try { existingConfig = JSON.parse(row.value_json); } catch (_) {}
+  }
+
+  const newConfig = {
+    provider: provider || existingConfig.provider || 'custom_smtp',
+    smtpHost: smtpHost !== undefined ? smtpHost.trim() : existingConfig.smtpHost,
+    smtpPort: smtpPort !== undefined ? Number(smtpPort) : (existingConfig.smtpPort || 587),
+    smtpUser: smtpUser !== undefined ? smtpUser.trim() : existingConfig.smtpUser,
+    smtpPass: (smtpPass && smtpPass.trim()) ? smtpPass.trim() : existingConfig.smtpPass,
+    smtpSecure: smtpSecure !== undefined ? Boolean(smtpSecure) : existingConfig.smtpSecure,
+    senderEmail: senderEmail !== undefined ? senderEmail.trim() : existingConfig.senderEmail,
+    senderName: senderName !== undefined ? senderName.trim() : existingConfig.senderName,
+    resendApiKey: (resendApiKey && resendApiKey.trim()) ? resendApiKey.trim() : existingConfig.resendApiKey
+  };
+
+  const valueJson = JSON.stringify(newConfig);
+  if (row) {
+    db.run("UPDATE platform_settings SET value_json = ?, updated_at = ? WHERE setting_key = 'email_config'", [valueJson, now]);
+  } else {
+    db.run("INSERT INTO platform_settings (setting_key, value_json, updated_at) VALUES ('email_config', ?, ?)", [valueJson, now]);
+  }
+  saveDatabase();
+
+  await recordAuditLog(req.user!.id, 'UPDATE_EMAIL_CONFIG', `Updated email provider configuration (${newConfig.provider})`, req.ip || '');
+
+  const connection = await verifyEmailConnection();
+  return res.json({
+    success: true,
+    message: 'Email settings saved successfully.',
+    connected: connection.connected,
+    connectionDetails: connection.details,
+    connectionError: connection.error
+  });
+});
+
+// POST /api/admin/test-email
+app.post('/api/admin/test-email', authMiddleware, ownerMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+  const { to } = req.body;
+  const targetEmail = (to || req.user?.email || OWNER_EMAIL).trim().toLowerCase();
+
+  try {
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const result = await sendVerificationEmail({
+      to: targetEmail,
+      name: 'DEAL Platform Administrator',
+      code,
+      type: 'verification'
+    });
+
+    await recordAuditLog(req.user!.id, 'TEST_EMAIL_SENT', `Sent live test email to ${targetEmail} via ${result.provider}`, req.ip || '');
+
+    return res.json({
+      success: true,
+      message: `Live test email delivered successfully to ${targetEmail} via ${result.provider}.`,
+      messageId: result.messageId,
+      code
+    });
+  } catch (err: any) {
+    console.error('[ADMIN TEST EMAIL FAILURE]', err);
+    return res.status(500).json({
+      error: `Live test email failed: ${err.message || err}`
+    });
+  }
 });
 
 // ----------------- AI ASSISTANT ROUTES (PRESERVED) -----------------

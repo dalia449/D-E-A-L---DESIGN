@@ -376,8 +376,8 @@ export const HandTrackingStudio: React.FC<HandTrackingStudioProps> = ({
       {/* Two-step Deliberate Camera Permission Modal */}
       <CameraPermissionModal
         isOpen={showPermissionModal}
-        featureName="Real Camera Hand Tracking"
-        explanation="DEAL needs access to your camera to detect your hands, 21 finger landmarks, and spatial gestures in real time."
+        featureName="Hand Tracking"
+        explanation="DEAL needs access to your camera to detect your hand movements and convert them into design actions."
         onAllow={handleConfirmAllowCamera}
         onCancel={() => setShowPermissionModal(false)}
       />
@@ -437,7 +437,7 @@ export const HandTrackingStudio: React.FC<HandTrackingStudioProps> = ({
                 className="px-4 py-2 bg-[#54483C] text-[#FAF7F2] rounded text-xs font-semibold hover:bg-[#3F3832] transition-colors flex items-center gap-2 shadow-sm disabled:opacity-50"
               >
                 <Camera className="w-4 h-4" />
-                <span>{modelLoading ? 'Initializing Vision...' : 'Start Real Camera Mode'}</span>
+                <span>{modelLoading ? 'Initializing Vision...' : 'Start Hand Tracking'}</span>
               </button>
 
               <button
